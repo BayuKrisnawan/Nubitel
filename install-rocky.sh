@@ -4,7 +4,7 @@ PATH=$PATH:/sbin:/bin:/usr/sbin:/usr/bin
 ## Requirement Packages ##
 REQPACK="git-core tar rsync jq openssl"
 WHEELGRP="wheel"
-NFSPATH="/data/nfs"
+NFSPATH="/data"
 
 NetworkConfig() {
     # 1. Ask for Interface Name (NIC) with validation loop
@@ -237,81 +237,106 @@ InstallPackages() {
 NFSConfig() {
     echo ""
     echo "============================================="
-    echo "NFS ROLE CONFIGURATION - NFS SERVER OR NFS CLIENT"
+    echo "NFS ROLE CONFIGURATION"
     echo "============================================="
     read -p "Do you want to configure this node as an NFS SERVER? (y/n): " IS_SERVER
+
+    # -----------------------------------------------------------------
+    # AUTOMATION OF SUBNET /24 FROM ACTIVE IP
+    # -----------------------------------------------------------------
+    # Get the active IP used for the default outbound route (main internet/lan)
+    ACTIVE_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -n 1)
+    
+    # If there is no external connection, take the first IP from the non-loopback interface.
+    if [ -z "$ACTIVE_IP" ]; then
+        ACTIVE_IP=$(hostname -I | awk '{print $1}')
+    fi
 
     if [[ "$IS_SERVER" == "y" || "$IS_SERVER" == "Y" ]]; then
         echo "--> Configuring Node as NFS SERVER..."
         
-        # Ask for the local directory path to export
-        read -p "Enter local directory path to export (e.g., /data/nfs): " EXPORT_PATH
-        [ -z "$EXPORT_PATH" ] && EXPORT_PATH=$NFSPATH
-        # Ask for the allowed network access
-        read -p "Enter allowed client network/IP (e.g., 192.168.1.0/24 or 0.0.0.0/0): " ALLOWED_NET
-        [ -z "$ALLOWED_NET" ] && ALLOWED_NET="0.0.0.0/0"
-        # Create directory if it does not exist
+        # Modify IP to subnet /24 (Example: 192.168.1.50 -> 192.168.1.0/24)
+        if [ ! -z "$ACTIVE_IP" ]; then
+            DEFAULT_NET=$(echo "$ACTIVE_IP" | cut -d'.' -f1-3)".0/24"
+            read -p "Enter allowed client network/IP [Default: $DEFAULT_NET]: " ALLOWED_NET
+            ALLOWED_NET=${ALLOWED_NET:-$DEFAULT_NET}
+        else
+            read -p "Enter allowed client network/IP (e.g., 192.168.1.0/24 or *): " ALLOWED_NET
+        fi
+        # -----------------------------------------------------------------
+
+        read -p "Enter local directory path to export [Default: $NFSPATH]: " EXPORT_PATH
+        EXPORT_PATH=${EXPORT_PATH:-"$NFSPATH"}
+        
         if [ ! -d "$EXPORT_PATH" ]; then
-            echo "Directory '$EXPORT_PATH' does not exist. Creating it..."
             mkdir -p "$EXPORT_PATH"
             chmod 777 "$EXPORT_PATH"
         fi
 
-        # Append configuration to /etc/exports safely
-        echo "$EXPORT_PATH $ALLOWED_NET(rw,sync,no_subtree_check,no_root_squash)" | tee /etc/exports > /dev/null
+        # Check if the export configuration already exists to avoid duplication.
+        if ! grep -q "$EXPORT_PATH" /etc/exports; then
+            echo "$EXPORT_PATH $ALLOWED_NET(rw,sync,no_subtree_check,no_root_squash)" | tee -a /etc/exports > /dev/null
+        else
+            echo "Configuration for $EXPORT_PATH already exists in /etc/exports."
+        fi
 
-        # Start and enable NFS Server services
-        echo "Starting and enabling NFS Server services..."
         systemctl enable --now rpcbind nfs-server
-        
-        # Export the shares immediately
         exportfs -arv
         
-        # Optional: open firewall ports for NFS if firewalld is active
         if systemctl is-active --quiet firewalld; then
-            echo "Opening firewall ports for NFS service..."
             firewall-cmd --permanent --add-service=nfs
             firewall-cmd --permanent --add-service=rpc-bind
             firewall-cmd --permanent --add-service=mountd
-            firewall-cmd --reload
+            firewall-cmd --reload > /dev/null
         fi
-
         echo "NFS Server configuration completed successfully!"
 
     else
         echo "--> Configuring Node as NFS CLIENT..."
-        echo ""
-        # Ask for Remote NFS Server details
-        read -p "Enter Remote NFS Server IP/Hostname (e.g., 192.168.1.5): " NFS_SERVER_IP
-        read -p "Enter Remote Exported Path (e.g., /data/nfs): " REMOTE_PATH
-        read -p "Enter Local Mount Point (e.g., /mnt/nfs_client): " LOCAL_MOUNT
+        [ ! -z "$ACTIVE_IP" ] && eNFS_SERVER=$(echo "$ACTIVE_IP" | cut -d'.' -f1-3)".x"
+        read -p "Enter Remote NFS Server IP/Hostname (e.g., $eNFS_SERVER: " NFS_SERVER_IP
         
-        # Create local mount point if it does not exist
+        if [ -z "$NFS_SERVER_IP" ]; then
+            echo "Error: Server IP cannot be empty."
+            return
+        fi
+
+        read -p "Enter Remote Exported Path [Default: /data/nfs]: " REMOTE_PATH
+        REMOTE_PATH=${REMOTE_PATH:-"/data/nfs"}
+
+        read -p "Enter Local Mount Point [Default: /mnt/nfs_client]: " LOCAL_MOUNT
+        LOCAL_MOUNT=${LOCAL_MOUNT:-"/mnt/nfs_client"}
+        
         if [ ! -d "$LOCAL_MOUNT" ]; then
-            echo "Creating local mount directory '$LOCAL_MOUNT'..."
             mkdir -p "$LOCAL_MOUNT"
         fi
 
-        # Prevent duplicate entries in /etc/fstab
-        FSTAB_ENTRY="$NFS_SERVER_IP:$REMOTE_PATH $LOCAL_MOUNT nfs defaults,_netdev 0 0"
-        if grep -q "$LOCAL_MOUNT" /etc/fstab; then
-            echo "Warning: A mount entry for '$LOCAL_MOUNT' already exists in /etc/fstab. Skipping entry creation."
+        # -----------------------------------------------------------------
+        # CHECK IF IT HAS BEEN MOUNTED (ANTI-REMOUNT)
+        # -----------------------------------------------------------------
+        if mountpoint -q "$LOCAL_MOUNT"; then
+            echo "--> INFO: Target directory '$LOCAL_MOUNT' is ALREADY mounted."
+            echo "Skipping mount process to prevent duplication/error."
         else
-            echo "Adding mount entry to /etc/fstab..."
-            echo "$FSTAB_ENTRY" | tee -a /etc/fstab > /dev/null
-        fi
+            echo "Directory not mounted. Processing mount..."
+            
+            FSTAB_ENTRY="$NFS_SERVER_IP:$REMOTE_PATH $LOCAL_MOUNT nfs defaults,_netdev 0 0"
+            
+            # Check fstab to avoid writing the same line repeatedly.
+            if ! grep -q "$LOCAL_MOUNT" /etc/fstab; then
+                echo "$FSTAB_ENTRY" | tee -a /etc/fstab > /dev/null
+            fi
 
-        # Enable rpcbind for client side cluster locking tracking
-        systemctl enable --now rpcbind
-
-        # Try to mount the directory right away
-        echo "Testing mount configuration..."
-        mount -a
-        if [ $? -eq 0 ]; then
-            echo "NFS Share mounted successfully at $LOCAL_MOUNT!"
-        else
-            echo "Error: Failed to mount NFS share. Please check remote server availability and firewalls."
+            systemctl enable --now rpcbind
+            mount "$LOCAL_MOUNT" 2>/dev/null || mount -a
+            
+            if mountpoint -q "$LOCAL_MOUNT"; then
+                echo "NFS Share mounted successfully at $LOCAL_MOUNT!"
+            else
+                echo "Error: Failed to mount NFS share. Please check Server IP and Export Path."
+            fi
         fi
+        # -----------------------------------------------------------------
     fi
 }
 

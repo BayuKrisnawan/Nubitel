@@ -301,11 +301,11 @@ NFSConfig() {
             return
         fi
 
-        read -p "Enter Remote Exported Path [Default: /data/nfs]: " REMOTE_PATH
-        REMOTE_PATH=${REMOTE_PATH:-"/data/nfs"}
+        read -p "Enter Remote Exported Path [Default: $NFSPATH]: " REMOTE_PATH
+        REMOTE_PATH=${REMOTE_PATH:-"$NFSPATH"}
 
-        read -p "Enter Local Mount Point [Default: /mnt/nfs_client]: " LOCAL_MOUNT
-        LOCAL_MOUNT=${LOCAL_MOUNT:-"/mnt/nfs_client"}
+        read -p "Enter Local Mount Point [Default: $NFSPATH: " LOCAL_MOUNT
+        LOCAL_MOUNT=${LOCAL_MOUNT:-"$NFSPATH"}
         
         if [ ! -d "$LOCAL_MOUNT" ]; then
             mkdir -p "$LOCAL_MOUNT"

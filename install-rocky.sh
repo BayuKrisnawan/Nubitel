@@ -2,238 +2,105 @@
 PATH=$PATH:/sbin:/bin:/usr/sbin:/usr/bin
 
 ## Requirement Packages ##
-REQPACK="git-core tar rsync jq openssl"
+REQPACK="git-core tar rsync jq openssl nfs-utils"
 WHEELGRP="wheel"
 NFSPATH="/data"
+## Global Variables ##
+DOMAIN="nubitel.io"
+NUBITEL_USER="nubitel"
+NUBITEL_GROUP="nubitel"
+NUBITEL_UID="2000"   # Tetap definisikan secara statis di variabel
+NUBITEL_GID="2000"   # Tetap definisikan secara statis di variabel
 
 NetworkConfig() {
-    # 1. Ask for Interface Name (NIC) with validation loop
+    # 1. OTOMATISASI DETEKSI DEFAULT NIC (Prioritas: Connected Ethernet -> Connected Lainnya)
+    DEFAULT_NIC=$(nmcli device status | grep -E "ethernet" | grep "connected" | awk '{print $1}' | head -n 1)
+    if [ -z "$DEFAULT_NIC" ]; then
+        # Jika tidak ada ethernet yang connected, cari wifi atau interface connected apa saja
+        DEFAULT_NIC=$(nmcli device status | grep "connected" | awk '{print $1}' | head -n 1)
+    fi
+
     while true; do
         echo "============================================="
-        # Display currently available network interfaces to guide the user
         echo "Detected Network Interfaces (NIC):"
-        nmcli device status | grep -E "ethernet|wifi" | awk '{print " - " $1 " (" $3 ") "}'
+        nmcli device status | grep -E "ethernet|wifi" | awk '{print " - " $1 " (" $3 ")"}'
         echo "============================================="
         echo ""
-        read -p "Enter Interface Name (e.g., eth0, ens33): " NIC
         
-        # Check if the interface is empty
+        # Tampilkan default NIC yang terdeteksi cerdas di dalam prompt
+        if [ ! -z "$DEFAULT_NIC" ]; then
+            read -p "Enter Interface Name [Default: $DEFAULT_NIC]: " NIC
+            NIC=${NIC:-$DEFAULT_NIC}
+        else
+            read -p "Enter Interface Name (e.g., eth0, ens33): " NIC
+        fi
+        
         if [ -z "$NIC" ]; then
             echo "Error: Interface name cannot be empty. Please try again."
-            echo ""
             sleep 1; clear
             continue
         fi
 
-        # Validate if the specified interface actually exists in the system
         if nmcli device show "$NIC" > /dev/null 2>&1; then
             echo "Success: Interface '$NIC' validated."
             break
         else
             echo "Error: Interface '$NIC' not found! Please enter a valid interface."
-            echo ""
             sleep 1; clear
         fi
-        
     done
     clear
     echo ""
     echo "Detecting current network settings for $NIC..."
 
-    # Auto-detect current active IP and Netmask/CIDR
     CURRENT_IP_CIDR=$(nmcli -g IP4.ADDRESS device show "$NIC" | head -n 1)
-    if [ ! -z "$CURRENT_IP_CIDR" ]; then
-        DEFAULT_IP=$(echo "$CURRENT_IP_CIDR" | cut -d'/' -f1)
-        DEFAULT_CIDR=$(echo "$CURRENT_IP_CIDR" | cut -d'/' -f2)
-    else
-        DEFAULT_IP=""
-        DEFAULT_CIDR="24"
-    fi
+    CURRENT_GW=$(nmcli -g IP4.GATEWAY device show "$NIC" | head -n 1)
+    
+    # 2. PERBAIKAN TOTAL CURRENT_DNS (Spesifik hanya membaca $NIC yang dipilih dan membersihkan karakter '|')
+    # Kita ambil output DNS, ganti karakter '|' menjadi koma, hapus spasi, dan hilangkan koma liar di ujung.
+    RAW_DNS=$(nmcli -g IP4.DNS device show "$NIC" | paste -sd "," - | tr '|' ',')
+    CURRENT_DNS=$(echo "$RAW_DNS" | sed 's/,\+/,/g' | sed 's/^,//;s/,$//' | tr -d ' ')
 
-    # Auto-detect current active Gateway
-    DEFAULT_GATEWAY=$(ip route show dev "$NIC" | grep default | awk '{print $3}' | head -n 1)
-    # Fallback if specific gateway for NIC not found, get global default gateway
-    if [ -z "$DEFAULT_GATEWAY" ]; then
-        DEFAULT_GATEWAY=$(ip route show | grep default | awk '{print $3}' | head -n 1)
-    fi
+    echo "----------------------------------------"
+    echo "Current IP/CIDR : $CURRENT_IP_CIDR"
+    echo "Current Gateway : $CURRENT_GW"
+    echo "Current DNS     : $CURRENT_DNS"
+    echo "----------------------------------------"
+    echo ""
 
-    # Auto-detect current DNS
-    DEFAULT_DNS=$(nmcli -g IP4.DNS device show "$NIC" | head -n 1 | awk '{print $1}')
+    read -p "Enter Static IP/CIDR [Default: $CURRENT_IP_CIDR]: " NEW_IP
+    NEW_IP=${NEW_IP:-$CURRENT_IP_CIDR}
 
-    # 2. Ask for IP Address (with default option)
-    if [ ! -z "$DEFAULT_IP" ]; then
-        read -p "Enter IP Address [Default: $DEFAULT_IP]: " IP
-        IP=${IP:-$DEFAULT_IP}
-    else
-        read -p "Enter IP Address (e.g., 192.168.10.10): " IP
-    fi
+    read -p "Enter Gateway [Default: $CURRENT_GW]: " NEW_GW
+    NEW_GW=${NEW_GW:-$CURRENT_GW}
 
-    # 3. Ask for Subnet Mask (with default option)
-    read -p "Enter Subnet Mask [Default: $DEFAULT_CIDR]: " NETMASK
-    NETMASK=${NETMASK:-$DEFAULT_CIDR}
+    read -p "Enter DNS (comma separated, e.g., 8.8.8.8,1.1.1.1) [Default: $CURRENT_DNS]: " NEW_DNS
+    NEW_DNS=${NEW_DNS:-$CURRENT_DNS}
 
-    # Convert traditional subnet mask format (255.255.255.0) to CIDR notation
-    if [[ "$NETMASK" == *"."* ]]; then
-        case $NETMASK in
-            255.255.255.0)   CIDR="24" ;;
-            255.255.0.0)     CIDR="16" ;;
-            255.0.0.0)       CIDR="8"  ;;
-            255.255.255.128) CIDR="25" ;;
-            255.255.255.192) CIDR="26" ;;
-            255.255.255.240) CIDR="28" ;;
-            *) 
-                echo "Uncommon Netmask format. Defaulting to /24..."
-                CIDR="24"
-                ;;
-        esac
-    else
-        CIDR=$NETMASK
-    fi
-
-    # 4. Ask for Gateway (with default option)
-    if [ ! -z "$DEFAULT_GATEWAY" ]; then
-        read -p "Enter Gateway [Default: $DEFAULT_GATEWAY]: " GATEWAY
-        GATEWAY=${GATEWAY:-$DEFAULT_GATEWAY}
-    else
-        read -p "Enter Gateway (e.g., 192.168.10.1): " GATEWAY
-    fi
-
-    # 5. Ask for Hostname & Domain
-    CURRENT_HOSTNAME=$(hostnamectl --static)
-    read -p "Enter Hostname & Domain [Default: $CURRENT_HOSTNAME]: " FULL_HOSTNAME
-    FULL_HOSTNAME=${FULL_HOSTNAME:-$CURRENT_HOSTNAME}
-
-    # 6. Ask for DNS Server (with default option)
-    if [ ! -z "$DEFAULT_DNS" ]; then
-        read -p "Enter DNS Server (CXGatewayIP 192.168.10.x) [Default: 192.168.10.x $DEFAULT_DNS]: " DNS_SERVER
-        DNS_SERVER=${DNS_SERVER:-$DEFAULT_DNS}
-    else
-        read -p "Enter DNS Server (e.g.,(CXGatewayIP 192.168.10.x) press Enter to skip): " DNS_SERVER
+    read -p "Enter Hostname Prefix (e.g., cxnfs, cxdb, cxgw, cxcall, cxapp): " HOST_PREFIX
+    if [ -z "$HOST_PREFIX" ]; then
+        HOST_PREFIX="cxnode"
     fi
 
     echo ""
-    echo "============================================="
-    echo "CONFIRM NEW NETWORK CONFIGURATION:"
-    echo "============================================="
-    echo "Interface   : $NIC"
-    echo "IP Address  : $IP/$CIDR"
-    echo "Gateway     : $GATEWAY"
-    echo "Hostname    : $FULL_HOSTNAME"
-    echo "DNS Server  : ${DNS_SERVER:-"Not configured"}"
-    echo "============================================="
-    read -p "Is the above information correct? (y/n): " CONFIRM
-
-    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-        echo "Configuration cancelled by user."
-        exit 0
-    fi
-
     echo "Applying network configuration..."
-    # Get the active NetworkManager connection name for the specified interface
-    CONN_NAME=$(nmcli -g GENERAL.CONNECTION device show "$NIC" | head -n 1)
+    nmcli connection modify "$NIC" \
+        ipv4.addresses "$NEW_IP" \
+        ipv4.gateway "$NEW_GW" \
+        ipv4.dns "$NEW_DNS" \
+        ipv4.method "manual"
 
-    # If no active connection exists, create a new profile using the interface name
-    if [ -z "$CONN_NAME" ]; then
-        CONN_NAME="$NIC"
-        nmcli connection add type ethernet con-name "$CONN_NAME" ifname "$NIC"
-    fi
+    nmcli connection up "$NIC"
+    hostnamectl set-hostname "${HOST_PREFIX}.${DOMAIN}"
 
-    # Execute Network Configuration via nmcli
-    echo "1. Configuring IP Address, Subnet, and Gateway..."
-    nmcli connection modify "$CONN_NAME" ipv4.addresses "$IP/$CIDR" ipv4.gateway "$GATEWAY" ipv4.method manual
-
-    # Apply DNS configuration if provided
-    if [ ! -z "$DNS_SERVER" ]; then
-        nmcli connection modify "$CONN_NAME" ipv4.dns "$DNS_SERVER"
-    fi
-
-    # Execute Hostname Configuration
-    echo "2. Setting system hostname - FQDN(eq rocky.nubitel.io)..."
-    hostnamectl set-hostname "$FULL_HOSTNAME"
-
-    # Restart the Interface to apply changes immediately
-    echo "3. Restarting network interface '$NIC'..."
-    nmcli connection down "$CONN_NAME" && nmcli connection up "$CONN_NAME"
-
-    echo "============================================="
-    echo "Network configuration completed successfully!"
-    echo "============================================="
+    echo "Network and Hostname updated successfully!"
 }
 
-## Generate SSH Key Pair
-GenerateSSHKeys() {
-    local user=$1
-    local path=$2
-    if [ "$user" == "root" ]; then
-        local user_home="/root"
-    else
-        local user_home="/home/$user"
-    fi
-
-    echo "Setting up SSH Key for user: $user..."
-    mkdir -p "$user_home/.ssh"
-
-    if [ ! -f "$user_home/.ssh/id_ed25519" ]; then
-        ssh-keygen -t ed25519 -N "" -f "$user_home/.ssh/id_ed25519"
-    else
-        echo "SSH Key already exists for $user, skipping creation."
-    fi
-
-    chmod 700 "$user_home/.ssh"
-    chmod 600 "$user_home/.ssh/id_ed25519"
-    chmod 644 "$user_home/.ssh/id_ed25519.pub"
-
-    if [ "$user" != "root" ]; then
-        chown -R "$user:$user" "$user_home/.ssh"
-    else
-        cat $HOME/.ssh/id_ed25519.pub |tee $path/.authorized_keys
-        chmod 600 $path/.authorized_keys
-    fi
-}
-## Check and Create/Update User for Podman
-UserConfig() {
-    while true; do
-        read -p "Enter username to run Podman (e.g., nubitel,podmanuser): " UPODMAN
-        if [ ! -z "$UPODMAN" ]; then
-            break
-        else
-            echo "Error: Username cannot be empty!"
-        fi
-    done
-
-    if id "$UPODMAN" >/dev/null 2>&1; then
-        echo "User '$UPODMAN' already exists."
-    else
-        echo "User '$UPODMAN' does not exist. Creating user..."
-        useradd -m -s /bin/bash "$UPODMAN"
-    fi
-    
-    if ! groups "$UPODMAN" | grep -q "\b$WHEELGRP\b"; then
-        echo "Adding user '$user' to group '$WHEELGRP'..."
-        usermod -aG "$WHEELGRP" "$UPODMAN"
-    fi
-
-    echo "Enabling linger for user '$UPODMAN'..."
-    loginctl enable-linger "$UPODMAN"
-    GenerateSSHKeys "$UPODMAN" "$CONFIG_PATH"
-}
-
-## Configure Sudoers Configuration
-UpdateSudo() {
-    echo "Configuring passwordless sudo for %wheel group..."
-    echo "%wheel ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/90-cloud-init-users > /dev/null
-    chmod 0440 /etc/sudoers.d/90-cloud-init-users
-}
-
-## Package Installation Function
 InstallPackages() {
-    reqpack=$REQPACK
-    [ ! -z $1 ] && reqpack=$1
-    echo "Updating dnf repositories and installing $reqpack packages..."
-    dnf install -y $reqpack
+    echo "Updating DNF Cache and Installing Base Packages..."
+    dnf install -y $REQPACK
 }
 
-## NFS Configuration Role Selector (Server / Client)
 NFSConfig() {
     echo ""
     echo "============================================="
@@ -241,39 +108,29 @@ NFSConfig() {
     echo "============================================="
     read -p "Do you want to configure this node as an NFS SERVER? (y/n): " IS_SERVER
 
-    # -----------------------------------------------------------------
-    # AUTOMATION OF SUBNET /24 FROM ACTIVE IP
-    # -----------------------------------------------------------------
-    # Get the active IP used for the default outbound route (main internet/lan)
-    ACTIVE_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -n 1)
-    
-    # If there is no external connection, take the first IP from the non-loopback interface.
-    if [ -z "$ACTIVE_IP" ]; then
-        ACTIVE_IP=$(hostname -I | awk '{print $1}')
-    fi
-
     if [[ "$IS_SERVER" == "y" || "$IS_SERVER" == "Y" ]]; then
         echo "--> Configuring Node as NFS SERVER..."
-        
-        # Modify IP to subnet /24 (Example: 192.168.1.50 -> 192.168.1.0/24)
+        ACTIVE_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7}' | head -n 1)
+        if [ -z "$ACTIVE_IP" ]; then
+            ACTIVE_IP=$(hostname -I | awk '{print $1}')
+        fi
+
         if [ ! -z "$ACTIVE_IP" ]; then
             DEFAULT_NET=$(echo "$ACTIVE_IP" | cut -d'.' -f1-3)".0/24"
             read -p "Enter allowed client network/IP [Default: $DEFAULT_NET]: " ALLOWED_NET
             ALLOWED_NET=${ALLOWED_NET:-$DEFAULT_NET}
         else
-            read -p "Enter allowed client network/IP (e.g., 192.168.1.0/24 or *): " ALLOWED_NET
+            read -p "Enter allowed client network/IP (e.g., 192.168.1.0/24): " ALLOWED_NET
         fi
-        # -----------------------------------------------------------------
 
-        read -p "Enter local directory path to export [Default: $NFSPATH]: " EXPORT_PATH
-        EXPORT_PATH=${EXPORT_PATH:-"$NFSPATH"}
+        read -p "Enter local directory path to export [Default: /data]: " EXPORT_PATH
+        EXPORT_PATH=${EXPORT_PATH:-"/data"}
         
         if [ ! -d "$EXPORT_PATH" ]; then
             mkdir -p "$EXPORT_PATH"
             chmod 777 "$EXPORT_PATH"
         fi
 
-        # Check if the export configuration already exists to avoid duplication.
         if ! grep -q "$EXPORT_PATH" /etc/exports; then
             echo "$EXPORT_PATH $ALLOWED_NET(rw,sync,no_subtree_check,no_root_squash)" | tee -a /etc/exports > /dev/null
         else
@@ -289,292 +146,203 @@ NFSConfig() {
             firewall-cmd --permanent --add-service=mountd
             firewall-cmd --reload > /dev/null
         fi
-        echo "NFS Server configuration completed successfully!"
+        echo "NFS Server configuration completed!"
 
     else
         echo "--> Configuring Node as NFS CLIENT..."
-        [ ! -z "$ACTIVE_IP" ] && eNFS_SERVER=$(echo "$ACTIVE_IP" | cut -d'.' -f1-3)".x"
-        read -p "Enter Remote NFS Server IP/Hostname (e.g., $eNFS_SERVER: " NFS_SERVER_IP
+        read -p "Enter Remote NFS Server IP/Hostname (e.g., 192.168.1.5): " NFS_SERVER_IP
         
         if [ -z "$NFS_SERVER_IP" ]; then
             echo "Error: Server IP cannot be empty."
             return
         fi
 
-        read -p "Enter Remote Exported Path [Default: $NFSPATH]: " REMOTE_PATH
-        REMOTE_PATH=${REMOTE_PATH:-"$NFSPATH"}
+        read -p "Enter Remote Exported Path [Default: /data]: " REMOTE_PATH
+        REMOTE_PATH=${REMOTE_PATH:-"/data"}
 
-        read -p "Enter Local Mount Point [Default: $NFSPATH: " LOCAL_MOUNT
-        LOCAL_MOUNT=${LOCAL_MOUNT:-"$NFSPATH"}
+        # read -p "Enter Local Mount Point [Default: $NFSPATH]: " LOCAL_MOUNT
+        echo "Local Mount Point [Default: $NFSPATH]"
+        LOCAL_MOUNT=${LOCAL_MOUNT:-"$NFSPATH"} 
         
+        if mount | grep -q -E "type nfs.* $LOCAL_MOUNT "; then
+            echo "--> INFO: Target directory '$LOCAL_MOUNT' is ALREADY mounted via NFS."
+            return
+        elif mount | grep -q -E "type nfs.* $(dirname $LOCAL_MOUNT) "; then
+            echo "--> WARNING: Parent directory of '$LOCAL_MOUNT' is already an active NFS Mount!"
+            return
+        fi
+
         if [ ! -d "$LOCAL_MOUNT" ]; then
             mkdir -p "$LOCAL_MOUNT"
         fi
 
-        # -----------------------------------------------------------------
-        # CHECK IF IT HAS BEEN MOUNTED (ANTI-REMOUNT)
-        # -----------------------------------------------------------------
-        if mountpoint -q "$LOCAL_MOUNT"; then
-            echo "--> INFO: Target directory '$LOCAL_MOUNT' is ALREADY mounted."
+        FSTAB_ENTRY="$NFS_SERVER_IP:$REMOTE_PATH $LOCAL_MOUNT nfs defaults,_netdev 0 0"
+        if ! grep -q "$LOCAL_MOUNT" /etc/fstab; then
+            echo "$FSTAB_ENTRY" | tee -a /etc/fstab > /dev/null
+        fi
+
+        systemctl enable --now rpcbind
+        mount "$LOCAL_MOUNT" 2>/dev/null || mount -a
+        echo "NFS Client successfully mounted to $LOCAL_MOUNT"
+    fi
+}
+
+UserConfig() {
+    echo ""
+    echo "============================================="
+    echo "       USER & PERMISSION CONFIGURATION       "
+    echo "============================================="
+
+    # 1. VALIDASI DAN CREATE GROUP
+    if getent group "$NUBITEL_GROUP" > /dev/null 2>&1; then
+        CURRENT_GID=$(getent group "$NUBITEL_GROUP" | cut -d: -f3)
+        if [ "$CURRENT_GID" -eq "$NUBITEL_GID" ]; then
+            echo "--> [SKIP]: Group '$NUBITEL_GROUP' sudah ada dengan GID $NUBITEL_GID yang benar."
         else
-            echo "Directory not mounted. Processing mount..."
-            
-            FSTAB_ENTRY="$NFS_SERVER_IP:$REMOTE_PATH $LOCAL_MOUNT nfs defaults,_netdev 0 0"
-            
-            # Check fstab to avoid writing the same line repeatedly.
-            if ! grep -q "$LOCAL_MOUNT" /etc/fstab; then
-                echo "$FSTAB_ENTRY" | tee -a /etc/fstab > /dev/null
-            fi
-
-            systemctl enable --now rpcbind
-            mount "$LOCAL_MOUNT" 2>/dev/null || mount -a
-            
-            if mountpoint -q "$LOCAL_MOUNT"; then
-                echo "NFS Share mounted successfully at $LOCAL_MOUNT!"
-            else
-                echo "Error: Failed to mount NFS share. Please check Server IP and Export Path."
-            fi
-        fi
-        # -----------------------------------------------------------------
-    fi
-}
-
-## PostgreSQL Server and DB Creation Function
-PostgresConfig() {
-    echo ""
-    echo "============================================="
-    echo "POSTGRESQL SERVER & DATABASE CONFIGURATION"
-    echo "============================================="
-    echo "============================================="
-    if [ ! -z "$EXPORT_PATH" ]; then
-        CONFIG_PATH=$EXPORT_PATH
-    else
-        CONFIG_PATH=$LOCAL_MOUNT
-    fi
-    if [[ -z "$CONFIG_PATH" && $(mountpoint -q "$NFSPATH"; echo $?) -eq 0 ]]; then
-        CONFIG_PATH=$NFSPATH
-    fi
-    [ -z $CONFIG_PATH  ] && echo "Install & Configure NFS (Server OR Client)..." && return
-    read -p "Do you want to install and configure PostgreSQL Server? (y/n): " IS_PG
-
-    if [[ "$IS_PG" == "y" || "$IS_PG" == "Y" ]]; then
-        echo "Installing PostgreSQL Server Packages..."
-        dnf install -y postgresql-server postgresql-contrib
-
-        PG_DATA_DIR="/var/lib/pgsql/data"
-
-        # Initialize PostgreSQL database cluster jika belum ada
-        if [ ! -f "$PG_DATA_DIR/PG_VERSION" ]; then
-            echo "Initializing PostgreSQL database..."
-            postgresql-setup --initdb
-        fi
-
-        echo "Configuring PostgreSQL to allow remote/container connections..."
-        if [ -f "$PG_DATA_DIR/postgresql.conf" ]; then
-            sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/g" "$PG_DATA_DIR/postgresql.conf"
-            sed -i "s/listen_addresses = 'localhost'/listen_addresses = '*'/g" "$PG_DATA_DIR/postgresql.conf"
-        fi
-
-        if [ -f "$PG_DATA_DIR/pg_hba.conf" ]; then
-            if ! grep -q "0.0.0.0/0" "$PG_DATA_DIR/pg_hba.conf"; then
-                echo "" >> "$PG_DATA_DIR/pg_hba.conf"
-                echo "# Allow connection from all hosts / containers" >> "$PG_DATA_DIR/pg_hba.conf"
-                echo "host    all             all             0.0.0.0/0               scram-sha-256" >> "$PG_DATA_DIR/pg_hba.conf"
-                echo "host    all             all             ::/0                    scram-sha-256" >> "$PG_DATA_DIR/pg_hba.conf"
-            fi
-        fi
-
-        echo "Starting/Restarting PostgreSQL service..."
-        systemctl enable postgresql
-        systemctl restart postgresql
-
-        # Menyiapkan file Environment baru (selalu ditimpa yang baru agar password-nya update)
-        ENV_FILE="$CONFIG_PATH/.envpgdb"
-        DATABASES=("nubitel" "reports" "identity" "fscoredb")
-        
-        echo "# PostgreSQL Generated Credentials - Updated on $(date)" > "$ENV_FILE"
-        chmod 600 "$ENV_FILE"
-
-        echo "Processing users and databases..."
-        for DB_NAME in "${DATABASES[@]}"; do
-            # Generate password acak baru
-            RAND_PASS=$(openssl rand -base64 12)
-            
-            echo "----------------------------------------"
-            echo "Database/User Target: $DB_NAME"
-
-            # 1. Cek apakah USER sudah ada
-            USER_EXISTS=$(su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='$DB_NAME'\"")
-            
-            if [ "$USER_EXISTS" == "1" ]; then
-                echo "-> User '$DB_NAME' already exists. Updating password..."
-                # JIKA ADA: Update password saja
-                su - postgres -c "psql -c \"ALTER USER $DB_NAME WITH PASSWORD '$RAND_PASS';\"" > /dev/null
-            else
-                echo "-> User '$DB_NAME' does not exist. Creating user..."
-                # JIKA TIDAK ADA: Buat baru
-                su - postgres -c "psql -c \"CREATE USER $DB_NAME WITH PASSWORD '$RAND_PASS';\"" > /dev/null
-            fi
-
-            # 2. Cek apakah DATABASE sudah ada
-            DB_EXISTS=$(su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='$DB_NAME'\"")
-            
-            if [ "$DB_EXISTS" == "1" ]; then
-                echo "-> Database '$DB_NAME' already exists. Skipping database creation."
-                # Pastikan owner-nya tetap benar
-                su - postgres -c "psql -c \"ALTER DATABASE $DB_NAME OWNER TO $DB_NAME;\"" > /dev/null
-            else
-                echo "-> Database '$DB_NAME' does not exist. Creating database..."
-                su - postgres -c "psql -c \"CREATE DATABASE $DB_NAME OWNER $DB_NAME;\"" > /dev/null
-            fi
-            
-            # 3. Simpan kredensial terbaru ke file .envpgdb
-            echo "${DB_NAME^^}_DB_USER=$DB_NAME" >> "$ENV_FILE"
-            echo "${DB_NAME^^}_DB_PASS=$RAND_PASS" >> "$ENV_FILE"
-            echo "${DB_NAME^^}_DB_NAME=$DB_NAME" >> "$ENV_FILE"
-            echo "----------------------------------------" >> "$ENV_FILE"
-        done
-
-        echo ""
-        echo "PostgreSQL setup/update completed!"
-        echo "New credentials successfully saved to: $ENV_FILE"
-        
-        if systemctl is-active --quiet firewalld; then
-            firewall-cmd --permanent --add-service=postgresql
-            firewall-cmd --reload > /dev/null
+            echo "--> [WARNING]: Group '$NUBITEL_GROUP' sudah ada tapi GID-nya salah ($CURRENT_GID)."
+            echo "    Mencoba memperbaiki GID menjadi $NUBITEL_GID..."
+            groupmod -g "$NUBITEL_GID" "$NUBITEL_GROUP"
         fi
     else
-        echo "Skipping PostgreSQL installation."
+        groupadd -g "$NUBITEL_GID" "$NUBITEL_GROUP"
+        echo "--> [SUCCESS]: Group '$NUBITEL_GROUP' berhasil dibuat dengan GID $NUBITEL_GID."
     fi
+
+    # 2. VALIDASI DAN CREATE USER
+    if getent passwd "$NUBITEL_USER" > /dev/null 2>&1; then
+        CURRENT_UID=$(getent passwd "$NUBITEL_USER" | cut -d: -f3)
+        CURRENT_USER_GID=$(getent passwd "$NUBITEL_USER" | cut -d: -f4)
+
+        if [ "$CURRENT_UID" -eq "$NUBITEL_UID" ] && [ "$CURRENT_USER_GID" -eq "$NUBITEL_GID" ]; then
+            echo "--> [SKIP]: User '$NUBITEL_USER' sudah ada dengan UID/GID $NUBITEL_UID yang benar."
+        else
+            echo "--> [WARNING]: User '$NUBITEL_USER' sudah ada tapi UID/GID tidak sesuai."
+            echo "    Memperbaiki konfigurasi user..."
+            usermod -u "$NUBITEL_UID" -g "$NUBITEL_GID" "$NUBITEL_USER"
+        fi
+    else
+        useradd -u "$NUBITEL_UID" -g "$NUBITEL_GID" -m -s /bin/bash "$NUBITEL_USER"
+        echo "--> [SUCCESS]: User '$NUBITEL_USER' berhasil dibuat dengan UID $NUBITEL_UID."
+    fi
+    echo "Enabling linger for user '$NUBITEL_USER'..."
+    loginctl enable-linger "$NUBITEL_USER"
 }
-PodmanConfig() {
-    echo "============================================="
-    echo "USER & PODMAN CONFIGURATION"
-    echo "============================================="
-    UserConfig
+
+UpdateSudo() {
+    SUDOERS_FILE="/etc/sudoers.d/$NUBITEL_USER"
+    # Menggunakan variabel user untuk hak akses sudo
+    echo "$NUBITEL_USER ALL=(ALL) NOPASSWD:ALL" > "$SUDOERS_FILE"
+    chmod 0440 "$SUDOERS_FILE"
+    echo "Sudoers rule updated: '$NUBITEL_USER' has NOPASSWD access."
 }
-## Ansible Host Installation Function
+
 AnsibleConfig() {
+    echo "Installing Ansible Core Engine on Master Host..."
+    dnf install -y epel-release
+    dnf install -y ansible-core
+    echo "Ansible installed successfully!"
+}
+
+FixHostConfig() {
     echo ""
     echo "============================================="
-    echo "ANSIBLE CONTROL NODE CONFIGURATION"
+    echo "       ANSIBLE SSH KEY CENTRAL DISTRIBUTION  "
     echo "============================================="
-    if [ ! -z "$EXPORT_PATH" ]; then
-        CONFIG_PATH=$EXPORT_PATH
-    else
-        CONFIG_PATH=$LOCAL_MOUNT
+    CLUSTER_NFS="$NFSPATH"
+
+    if ! mountpoint -q "$CLUSTER_NFS"; then
+        echo "Error: Path '$CLUSTER_NFS' is not an active NFS mount point!"
+        return
     fi
-    [ -z $CONFIG_PATH  ] && echo "Install & Configure NFS (Server / Client)..." && return
-    read -p "Do you want to configure this node as an Ansible Control Host (Only One Host Allowed)? (y/n): " IS_ANSIBLE
 
+    local nfs_key_dir="$CLUSTER_NFS/.ansible_master_key"
+    local master_pub_file="$nfs_key_dir/ansible_controller.pub"
 
-    echo "CONFIG_PATH: $CONFIG_PATH"
-    if [[ "$IS_ANSIBLE" == "y" || "$IS_ANSIBLE" == "Y" ]]; then
-        echo "Installing Ansible..."
-        # Ansible standard package requires EPEL repository on Rocky Linux
-        if ! rpm -q epel-release > /dev/null 2>&1; then
-            echo "Enabling EPEL repository..."
-            InstallPackages epel-release
+    echo "Are you running this script on the ANSIBLE CONTROL HOST (Master)? "
+    read -p "(y = Master Node / n = Target Node): " IS_MASTER
+
+    if [[ "$IS_MASTER" == "y" || "$IS_MASTER" == "Y" ]]; then
+        mkdir -p "$nfs_key_dir"
+        chmod 700 "$nfs_key_dir"
+
+        if [ ! -f "/root/.ssh/id_ed25519" ]; then
+            echo "Generating SSH Key for Ansible Master..."
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519
         fi
-        InstallPackages ansible-core
-        
-        echo ""
-        echo "Ansible installed successfully!"
-        echo "--------------------------------------------------------"
-        echo "TIP to share SSH Key to your 6 hosts:"
-        echo "Run this command on your terminal later to push public key:"
-        echo "  ssh-copy-id root@<TARGET_IP>"
-        echo "--------------------------------------------------------"
-        # Setup SSH Keys
-        echo ""
-        echo "============================================="
-        echo "GENERATING SSH KEYS -> $CONFIG_PATH"
-        echo "============================================="
-        GenerateSSHKeys "root" "$CONFIG_PATH"
+
+        cp "/root/.ssh/id_ed25519.pub" "$master_pub_file"
+        chmod 644 "$master_pub_file"
+        echo "Success: Ansible Master Public Key deposited to NFS."
+    else
+        if [ ! -f "$master_pub_file" ]; then
+            echo "Error: Ansible Master Public Key not found in NFS yet!"
+            return
+        fi
+
+        mkdir -p "/root/.ssh" && chmod 700 "/root/.ssh"
+        MASTER_KEY_CONTENT=$(cat "$master_pub_file")
+
+        if ! grep -q "$MASTER_KEY_CONTENT" /root/.ssh/authorized_keys 2>/dev/null; then
+            echo "$MASTER_KEY_CONTENT" >> "/root/.ssh/authorized_keys"
+            chmod 600 "/root/.ssh/authorized_keys"
+            echo "Success: Ansible Master Public Key authorized on this node."
+        else
+            echo "INFO: Key already authorized. Skipping."
+        fi
     fi
 }
 
-# =====================================================================
-# DISPLAY MENU FUNCTION
-# =====================================================================
 ShowMenu() {
     clear
-    echo "============================================="
-    echo "       NODE DEPLOYMENT & AUTOMATION          "
-    echo "============================================="
-    echo "Current System Hostname: $(hostname)"
-    echo "Current Date           : $(date)"
-    echo "============================================="
-    echo "Please select an option from the menu below:"
+    echo "========================================================="
+    echo "       NUBITEL SYSTEM ON-PREMISE BOOTSTRAP DEPLOYER       "
+    echo "                    ROCKY LINUX EDITION                  "
+    echo "========================================================="
+    echo "Current Hostname : $(hostname)"
+    echo "========================================================="
+    echo "Select Bootstrap Step:"
     echo ""
 
-    # Definisikan opsi menu dalam bentuk array
     options=(
-        "Configure Network (Static IP & Hostname)"
-        "Install Base Packages (REQPACK)"
-        "Install & Configure NFS (Server / Client)"
-        "Install & Setup PostgreSQL Server"
-        "Install Podman"
+        "Configure Network & Hostname"
+        "Install Base Engine Pack"
+        "Setup NFS (Server / Client)"
         "Setup User & Permission"
-        "Configure Ansible Control Host"
-        "Run All Setup (Full Automation)"
+        "Configure Ansible Engine (Master Only)"
+        "Fix Host (Sync Ansible SSH Keys)"
         "Exit Script"
     )
 
-    # PS3 adalah prompt teks yang muncul di bawah menu untuk meminta input
-    PS3="[$USER@$(hostname) Menu Selection]# "
+    PS3="[Bootstrap Selection]# "
 
     select opt in "${options[@]}"; do
         case $opt in
-            "Configure Network (Static IP & Hostname)")
-                echo -e "\n>>> Starting Network Configuration..."
-                NetworkConfig
-                break ;;
-            "Install Base Packages (REQPACK)")
-                echo -e "\n>>> Installing Requirements..."
-                InstallPackages 
-                break ;;
-            "Install & Configure NFS (Server / Client)")
-                echo -e "\n>>> Installing & Configure NFS..."
-                InstallPackages nfs-utils 
-                NFSConfig
-                break ;;
-            "Install & Setup PostgreSQL Server")
-                PostgresConfig ; break ;;
-            "Install Podman")
-                echo -e "\n>>> Starting Install Podman..."
-                InstallPackages podman; break ;;
+            "Configure Network & Hostname")
+                NetworkConfig; break ;;
+            "Install Base Engine Pack")
+                InstallPackages; break ;;
+            "Setup NFS (Server / Client)")
+                NFSConfig; break ;;
             "Setup User & Permission")
-                echo -e "\n>>> Starting User Configuration..."
-                UserConfig
-                UpdateSudo
-                break;;
-            "Configure Ansible Control Host")
-                echo -e "\n>>> Configuring Ansible Controler..."
-                AnsibleConfig
-                break ;;
+                UserConfig; UpdateSudo; break ;;
+            "Configure Ansible Engine (Master Only)")
+                AnsibleConfig; break ;;
+            "Fix Host (Sync Ansible SSH Keys)")
+                FixHostConfig; break ;;
             "Exit Script")
-                echo "Exiting. Goodbye!"
-                exit 0
-                ;;
+                echo "Exiting. Goodbye!"; exit 0 ;;
             *) 
-                # Jika user memasukkan angka yang tidak ada di menu
-                echo "Invalid option $REPLY. Please choose a number between 1 and ${#options[@]}."
-                ;;
+                echo "Invalid option $REPLY." ;;
         esac
     done
 }
 
-# =====================================================================
-# MAIN LOOP (Agar setelah selesai eksekusi, menu muncul lagi)
-# =====================================================================
-# Pastikan dijalankan sebagai root
 if [ "$EUID" -ne 0 ]; then
-  echo "Error: Please run this script as root or using sudo."
+  echo "Error: Please run this script as root."
   exit 1
 fi
 
-# Loop utama agar skrip tidak langsung mati setelah satu tugas selesai
 while true; do
     ShowMenu
     echo ""

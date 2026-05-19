@@ -316,7 +316,6 @@ NFSConfig() {
         # -----------------------------------------------------------------
         if mountpoint -q "$LOCAL_MOUNT"; then
             echo "--> INFO: Target directory '$LOCAL_MOUNT' is ALREADY mounted."
-            echo "Skipping mount process to prevent duplication/error."
         else
             echo "Directory not mounted. Processing mount..."
             
@@ -351,6 +350,9 @@ PostgresConfig() {
         CONFIG_PATH=$EXPORT_PATH
     else
         CONFIG_PATH=$LOCAL_MOUNT
+    fi
+    if [[ -n "$CONFIG_PATH" && $(mountpoint -q "$LOCAL_MOUNT"; echo $?) -eq 0 ]]; then
+        CONFIG_PATH=$NFSPATH
     fi
     [ -z $CONFIG_PATH  ] && echo "Install & Configure NFS (Server OR Client)..." && return
     read -p "Do you want to install and configure PostgreSQL Server? (y/n): " IS_PG
@@ -388,7 +390,7 @@ PostgresConfig() {
 
         # Menyiapkan file Environment baru (selalu ditimpa yang baru agar password-nya update)
         ENV_FILE="$CONFIG_PATH/.envpgdb"
-        DATABASES=("nubitel" "jasperreports" "identity" "fscoredb")
+        DATABASES=("nubitel" "reports" "identity" "fscoredb")
         
         echo "# PostgreSQL Generated Credentials - Updated on $(date)" > "$ENV_FILE"
         chmod 600 "$ENV_FILE"

@@ -351,7 +351,7 @@ PostgresConfig() {
     else
         CONFIG_PATH=$LOCAL_MOUNT
     fi
-    if [[ -n "$CONFIG_PATH" && $(mountpoint -q "$LOCAL_MOUNT"; echo $?) -eq 0 ]]; then
+    if [[ -z "$CONFIG_PATH" && $(mountpoint -q "$NFSPATH"; echo $?) -eq 0 ]]; then
         CONFIG_PATH=$NFSPATH
     fi
     [ -z $CONFIG_PATH  ] && echo "Install & Configure NFS (Server OR Client)..." && return

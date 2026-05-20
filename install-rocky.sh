@@ -250,46 +250,50 @@ FixHostConfig() {
     echo "============================================="
     CLUSTER_NFS="$NFSPATH"
 
-    if ! mountpoint -q "$CLUSTER_NFS"; then
-        echo "Error: Path '$CLUSTER_NFS' is not an active NFS mount point!"
-        return
-    fi
-
     local nfs_key_dir="$CLUSTER_NFS/.ansible_master_key"
     local master_pub_file="$nfs_key_dir/ansible_controller.pub"
 
+    if ! mountpoint -q "$CLUSTER_NFS" &&  [ ! -f "$master_pub_file" ] ; then
+        echo -e "Error: Path '$CLUSTER_NFS' is not an active NFS mount point or master ansible not configured!"
+        return
+    fi
+
     echo "Are you running this script on the ANSIBLE CONTROL HOST (Master)? "
     read -p "(y = Master Node / n = Target Node): " IS_MASTER
-
+    mkdir -p "/root/.ssh" && chmod 700 "/root/.ssh"
+    mkdir -p /home/$NUBITEL_USER/.ssh && chmod 700 /home/$NUBITEL_USER/.ssh
+    
     if [[ "$IS_MASTER" == "y" || "$IS_MASTER" == "Y" ]]; then
         mkdir -p "$nfs_key_dir"
         chmod 700 "$nfs_key_dir"
 
         if [ ! -f "/root/.ssh/id_ed25519" ]; then
             echo "Generating SSH Key for Ansible Master..."
-            mkdir -p /root/.ssh && chmod 700 /root/.ssh
             ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519
+            cat  "/root/.ssh/id_ed25519.pub" >> "$master_pub_file"
         fi
 
-        cp "/root/.ssh/id_ed25519.pub" "$master_pub_file"
         chmod 644 "$master_pub_file"
+        cat $master_pub_file > /home/$NUBITEL_USER/.ssh/authorized_keys
+        chmod 600 /root/.ssh/authorized_keys
+        chmod 600 /home/$NUBITEL_USER/.ssh/authorized_keys
+        mkdir -p /home/$NUBITEL_USER/.ssh && chmod 700 /home/$NUBITEL_USER/.ssh
+        chown -R $NUBITEL_USER:$NUBITEL_GROUP /home/$NUBITEL_USER/.ssh
         echo "Success: Ansible Master Public Key deposited to NFS."
     else
+        ## Key for root
         if [ ! -f "$master_pub_file" ]; then
             echo "Error: Ansible Master Public Key not found in NFS yet!"
             return
         fi
-
-        mkdir -p "/root/.ssh" && chmod 700 "/root/.ssh"
         MASTER_KEY_CONTENT=$(cat "$master_pub_file")
-
-        if ! grep -q "$MASTER_KEY_CONTENT" /root/.ssh/authorized_keys 2>/dev/null; then
-            echo "$MASTER_KEY_CONTENT" >> "/root/.ssh/authorized_keys"
-            chmod 600 "/root/.ssh/authorized_keys"
-            echo "Success: Ansible Master Public Key authorized on this node."
-        else
-            echo "INFO: Key already authorized. Skipping."
-        fi
+        echo "$MASTER_KEY_CONTENT" > "/root/.ssh/authorized_keys"
+        chmod 600 "/root/.ssh/authorized_keys"
+        ## Key for $NUBITEL_USER
+        echo "$MASTER_KEY_CONTENT" > "/home/$NUBITEL_USER/.ssh/authorized_keys"
+        chmod 600 "/home/$NUBITEL_USER/.ssh/authorized_keys"
+        chown -R $NUBITEL_USER:$NUBITEL_GROUP /home/$NUBITEL_USER/.ssh
+        echo "Success: Ansible Master Public Key authorized on this node."
     fi
 }
 

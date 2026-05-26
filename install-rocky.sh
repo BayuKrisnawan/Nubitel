@@ -2,7 +2,7 @@
 PATH=$PATH:/sbin:/bin:/usr/sbin:/usr/bin
 
 ## Requirement Packages ##
-REQPACK="git-core tar rsync jq openssl nfs-utils"
+REQPACK="git-core tar rsync jq openssl nfs-utils unzip curl"
 WHEELGRP="wheel"
 NFSPATH="/data"
 ## Global Variables ##
@@ -11,6 +11,7 @@ NUBITEL_USER="nubitel"
 NUBITEL_GROUP="nubitel"
 NUBITEL_UID="2000"   # Tetap definisikan secara statis di variabel
 NUBITEL_GID="2000"   # Tetap definisikan secara statis di variabel
+AWSCLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
 
 NetworkConfig() {
     # 1. OTOMATISASI DETEKSI DEFAULT NIC (Prioritas: Connected Ethernet -> Connected Lainnya)
@@ -264,9 +265,16 @@ FixHostConfig() {
     mkdir -p /home/$NUBITEL_USER/.ssh && chmod 700 /home/$NUBITEL_USER/.ssh
     
     if [[ "$IS_MASTER" == "y" || "$IS_MASTER" == "Y" ]]; then
+        ##Installing aws cli
+        cd /tmp/ 
+        curl -s $AWSCLI_URL -o "awscliv2.zip"
+        unzip -o awscliv2.zip
+        ./aws/install --update && cd 
+        
+        
         mkdir -p "$nfs_key_dir"
         chmod 700 "$nfs_key_dir"
-
+    
         if [ ! -f "/root/.ssh/id_ed25519" ]; then
             echo "Generating SSH Key for Ansible Master..."
             ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519

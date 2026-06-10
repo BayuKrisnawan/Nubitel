@@ -266,6 +266,7 @@ FixHostConfig() {
     
     if [[ "$IS_MASTER" == "y" || "$IS_MASTER" == "Y" ]]; then
         ##Installing aws cli
+	AnsibleConfig 
         cd /tmp/ 
         curl -s $AWSCLI_URL -o "awscliv2.zip"
         unzip -o awscliv2.zip
@@ -321,8 +322,7 @@ ShowMenu() {
         "Install Base Engine Pack"
         "Setup NFS (Server / Client)"
         "Setup User & Permission"
-        "Configure Ansible Engine (Master Only)"
-        "Fix Host (Sync Ansible SSH Keys)"
+        "Ansible Master - Fix Host (Sync Ansible SSH Keys)"
         "Exit Script"
     )
 
@@ -338,9 +338,7 @@ ShowMenu() {
                 NFSConfig; break ;;
             "Setup User & Permission")
                 UserConfig; UpdateSudo; break ;;
-            "Configure Ansible Engine (Master Only)")
-                AnsibleConfig; break ;;
-            "Fix Host (Sync Ansible SSH Keys)")
+            "Ansible Master - Fix Host (Sync Ansible SSH Keys)")
                 FixHostConfig; break ;;
             "Exit Script")
                 echo "Exiting. Goodbye!"; exit 0 ;;
